@@ -111,7 +111,7 @@ async def create_task_and_runner(
 ) -> tuple[PipelineTask, PipelineRunner, WebsocketServerTransport]:
     transport = WebsocketServerTransport(
         host=os.getenv("WS_HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", os.getenv("WS_PORT", "8765"))),
+        port=int(os.getenv("WS_PORT", "8765")),
         params=WebsocketServerParams(
             audio_in_enabled=True,
             audio_out_enabled=True,

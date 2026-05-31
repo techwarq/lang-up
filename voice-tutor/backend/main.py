@@ -1,5 +1,6 @@
 import asyncio
 import os
+from aiohttp import web
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,6 +10,22 @@ from memory.short_term import ShortTermMemory
 from memory import long_term
 from logger import TurnLogger
 from pipeline import create_task_and_runner
+
+
+async def _health_server() -> None:
+    """Tiny HTTP server so Railway health checks pass."""
+    async def health(_: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Railway exposes PORT for HTTP; we serve health checks there
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
 
 
 async def run() -> None:
@@ -45,5 +62,9 @@ async def run() -> None:
         print(f"Session {session_id} ended — {logger.turn_count} turns logged")
 
 
+async def main() -> None:
+    await asyncio.gather(_health_server(), run())
+
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(main())
