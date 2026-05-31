@@ -199,6 +199,7 @@ async def create_task_and_runner(
     task = PipelineTask(
         pipeline,
         params=PipelineParams(),
+        enable_rtvi=False,
         idle_timeout_secs=None,
     )
 
