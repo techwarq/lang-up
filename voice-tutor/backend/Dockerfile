@@ -9,8 +9,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Railway sets PORT automatically; WS server listens on PORT
-# For local dev, set WS_PORT=8765 in your environment
+ENV WS_PORT=8765
+
 EXPOSE 8765
 
 CMD ["python", "main.py"]

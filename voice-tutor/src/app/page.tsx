@@ -21,6 +21,27 @@ interface Stats {
   lastStt: string;
 }
 
+interface UserProfile {
+  userId: string;
+  name: string;
+  language: string;
+  goal: string;
+}
+
+const LANGUAGES = [
+  { value: "spanish",    label: "Spanish",    flag: "🇪🇸" },
+  { value: "french",     label: "French",     flag: "🇫🇷" },
+  { value: "german",     label: "German",     flag: "🇩🇪" },
+  { value: "portuguese", label: "Portuguese", flag: "🇧🇷" },
+];
+
+const GOALS = [
+  { value: "travel",  label: "Travel & Everyday life" },
+  { value: "work",    label: "Work & Business" },
+  { value: "culture", label: "Culture & Media" },
+  { value: "general", label: "General conversation" },
+];
+
 const LESSON_TITLES: Record<string, string> = {
   "lesson-greetings": "Greetings & Introductions",
   "lesson-numbers": "Numbers & Basic Shopping",
@@ -80,6 +101,27 @@ const ROLEPLAY_SCENARIOS = [
 
 const NUM_BARS = 30;
 
+function loadProfile(): UserProfile | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem("linguavoice_profile");
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function saveProfile(p: UserProfile) {
+  localStorage.setItem("linguavoice_profile", JSON.stringify(p));
+}
+
+function makeUserId(): string {
+  if (typeof window === "undefined") return "user-001";
+  const existing = localStorage.getItem("linguavoice_userid");
+  if (existing) return existing;
+  const id = "user-" + Math.random().toString(36).slice(2, 10);
+  localStorage.setItem("linguavoice_userid", id);
+  return id;
+}
+
 export default function Page() {
   const [status, setStatus] = useState<Status>("disconnected");
   const [agentState, setAgentState] = useState<AgentState>("idle");
@@ -91,6 +133,16 @@ export default function Page() {
   const [stats, setStats] = useState<Stats>({ latencyMs: 0, turns: 0, quizScore: "—", lastStt: "" });
   const [progress, setProgress] = useState(0);
   const [dbg, setDbg] = useState<string[]>([]);
+
+  const [wsUrl, setWsUrl] = useState("ws://localhost:8765");
+
+  // Onboarding
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [draftLanguage, setDraftLanguage] = useState("spanish");
+  const [draftGoal, setDraftGoal] = useState("general");
+
   const log = (msg: string) => { console.log("[DBG]", msg); setDbg(p => [...p.slice(-6), msg]); };
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -106,6 +158,20 @@ export default function Page() {
   const agentStateRef = useRef<AgentState>("idle");
 
   useEffect(() => { agentStateRef.current = agentState; }, [agentState]);
+
+  // Load WS URL and profile on mount
+  useEffect(() => {
+    fetch("/api/config")
+      .then(r => r.json())
+      .then(d => { if (d.wsUrl) setWsUrl(d.wsUrl); })
+      .catch(() => {});
+    const saved = loadProfile();
+    if (saved) {
+      setProfile(saved);
+    } else {
+      setShowOnboarding(true);
+    }
+  }, []);
 
   const addBubble = useCallback((speaker: "user" | "agent", text: string, isDoubt = false) => {
     setBubbles(prev => [...prev.slice(-24), { id: idRef.current++, speaker, text, isDoubt }]);
@@ -202,12 +268,16 @@ export default function Page() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [bubbles]);
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (connectProfile: UserProfile) => {
     if (status !== "disconnected") return;
     setStatus("connecting");
-    try { await fetch("/api/ping"); } catch { /* non-fatal */ }
-    const wsUrl = process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? "ws://localhost:8765";
-    const ws = new WebSocket(wsUrl);
+    const qs = new URLSearchParams({
+      userId: connectProfile.userId,
+      name: connectProfile.name,
+      language: connectProfile.language,
+      goal: connectProfile.goal,
+    }).toString();
+    const ws = new WebSocket(`${wsUrl}?${qs}`);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
@@ -256,14 +326,41 @@ export default function Page() {
       nextPlayTimeRef.current = 0;
     };
     ws.onerror = () => ws.close();
-  }, [status, handleServerMsg, scheduleAudioChunk]);
+  }, [status, wsUrl, handleServerMsg, scheduleAudioChunk]);
 
   const disconnect = useCallback(() => {
     listeningRef.current = false;
     wsRef.current?.close();
   }, []);
 
+  const handleOnboardingSubmit = useCallback(() => {
+    const p: UserProfile = {
+      userId: makeUserId(),
+      name: draftName.trim(),
+      language: draftLanguage,
+      goal: draftGoal,
+    };
+    saveProfile(p);
+    setProfile(p);
+    setShowOnboarding(false);
+    connect(p);
+  }, [draftName, draftLanguage, draftGoal, connect]);
+
+  const handleMicClick = useCallback(() => {
+    if (status === "connected") {
+      disconnect();
+    } else if (status === "disconnected") {
+      if (profile) {
+        connect(profile);
+      } else {
+        setShowOnboarding(true);
+      }
+    }
+  }, [status, profile, connect, disconnect]);
+
   // Derived display values
+  const activeLang = LANGUAGES.find(l => l.value === (profile?.language ?? "spanish")) ?? LANGUAGES[0];
+
   const headerTitle = agentState === "roleplay" && scenarioTitle
     ? scenarioTitle
     : lessonId ? (LESSON_TITLES[lessonId] ?? lessonId)
@@ -301,12 +398,71 @@ export default function Page() {
 
   return (
     <div className="app">
+      {/* Onboarding modal */}
+      {showOnboarding && (
+        <div className="onboarding-overlay">
+          <div className="onboarding-modal">
+            <div className="onboarding-logo">{activeLang.flag} LinguaVoice</div>
+            <h2 className="onboarding-title">Welcome! Let&rsquo;s personalise your experience</h2>
+            <p className="onboarding-sub">Sofia will remember your progress and adapt to your goals.</p>
+
+            <label className="onboarding-label">Your name <span>(optional)</span></label>
+            <input
+              className="onboarding-input"
+              type="text"
+              placeholder="e.g. Maria"
+              value={draftName}
+              onChange={e => setDraftName(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") handleOnboardingSubmit(); }}
+              autoFocus
+            />
+
+            <label className="onboarding-label">Language to learn</label>
+            <div className="onboarding-lang-grid">
+              {LANGUAGES.map(l => (
+                <button
+                  key={l.value}
+                  className={`onboarding-lang-btn${draftLanguage === l.value ? " selected" : ""}`}
+                  onClick={() => setDraftLanguage(l.value)}
+                >
+                  <span className="lang-flag">{l.flag}</span>
+                  <span>{l.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <label className="onboarding-label">Your goal</label>
+            <div className="onboarding-goal-grid">
+              {GOALS.map(g => (
+                <button
+                  key={g.value}
+                  className={`onboarding-goal-btn${draftGoal === g.value ? " selected" : ""}`}
+                  onClick={() => setDraftGoal(g.value)}
+                >
+                  {g.label}
+                </button>
+              ))}
+            </div>
+
+            <button className="onboarding-submit" onClick={handleOnboardingSubmit}>
+              <i className="ti ti-microphone" /> Start learning with Sofia
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Sidebar */}
       <div className="sidebar">
         <div className="sidebar-logo">
-          <div className="name">🇪🇸 LinguaVoice</div>
-          <small>Spanish · Beginner</small>
+          <div className="name">{activeLang.flag} LinguaVoice</div>
+          <small>{activeLang.label} · {profile?.goal ? GOALS.find(g => g.value === profile.goal)?.label?.split(" ")[0] : "Beginner"}</small>
         </div>
+
+        {profile?.name && (
+          <div style={{ padding: "0 16px 8px", fontSize: 12, color: "var(--text-secondary)" }}>
+            Hey, {profile.name}!
+          </div>
+        )}
 
         <span className="nav-section">Modes</span>
         {(["Lesson", "Quiz", "Roleplay", "Doubt"] as const).map(m => (
@@ -352,6 +508,13 @@ export default function Page() {
             <span>{stats.turns > 0 ? `+${stats.turns * 2} XP` : "0 XP"}</span>
           </div>
         </div>
+
+        <button
+          className="sidebar-reset"
+          onClick={() => { localStorage.removeItem("linguavoice_profile"); setProfile(null); setShowOnboarding(true); }}
+        >
+          <i className="ti ti-settings" /> Change profile
+        </button>
       </div>
 
       {/* Main */}
@@ -385,7 +548,7 @@ export default function Page() {
               <i className="ti ti-messages" />
               <div>
                 <div className="roleplay-banner-title">Roleplay: {scenarioTitle}</div>
-                <div className="roleplay-banner-sub">Respond in Spanish — Sofia will correct gently and keep the scene going. Say &ldquo;stop&rdquo; to exit.</div>
+                <div className="roleplay-banner-sub">Respond in {activeLang.label} — Sofia will correct gently and keep the scene going. Say &ldquo;stop&rdquo; to exit.</div>
               </div>
             </div>
           )}
@@ -394,7 +557,7 @@ export default function Page() {
           {isListening && (
             <div className="listening-indicator">
               <i className="ti ti-headphones" />
-              <span>Listening question — Sofia will say the Spanish phrase. Translate what you hear.</span>
+              <span>Listening question — Sofia will say the phrase. Translate what you hear.</span>
             </div>
           )}
 
@@ -427,7 +590,7 @@ export default function Page() {
               <div key={b.id} className={`bubble ${b.speaker}`}>
                 {b.speaker === "agent" && (
                   <div className="lang-tag">
-                    {agentState === "roleplay" ? "Sofia · in character" : agentState === "doubt" ? "Sofia · EN (doubt)" : "Sofia · EN + ES"}
+                    {agentState === "roleplay" ? "Sofia · in character" : agentState === "doubt" ? "Sofia · EN (doubt)" : `Sofia · EN + ${activeLang.label.slice(0, 2).toUpperCase()}`}
                   </div>
                 )}
                 {b.text}
@@ -446,7 +609,7 @@ export default function Page() {
         <div className="voice-bar">
           <button
             className={`mic-btn${status === "connected" ? " listening" : status === "connecting" ? " connecting" : ""}`}
-            onClick={status === "disconnected" ? connect : disconnect}
+            onClick={handleMicClick}
             aria-label={status === "connected" ? "Stop session" : "Start session"}
           >
             <i className={`ti ${status === "connected" ? "ti-microphone" : status === "connecting" ? "ti-loader-2" : "ti-microphone-off"}`} />
@@ -465,7 +628,7 @@ export default function Page() {
           <div className="voice-hint">
             {status === "connected"
               ? agentState === "roleplay"
-                ? "Speak Spanish — interrupt anytime"
+                ? `Speak ${activeLang.label} — interrupt anytime`
                 : "Say \"quiz me\" or interrupt anytime"
               : status === "connecting"
               ? "Connecting to voice server…"

@@ -20,6 +20,12 @@ async def get_db() -> aiosqlite.Connection:
 async def _migrate(conn: aiosqlite.Connection) -> None:
     for statement in ALL_TABLES:
         await conn.execute(statement)
+    # Add new columns to existing databases (safe no-op if columns exist)
+    for col, default in [("name", "''"), ("target_language", "'spanish'"), ("goal", "'general'")]:
+        try:
+            await conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT {default}")
+        except Exception:
+            pass
     await conn.commit()
 
 

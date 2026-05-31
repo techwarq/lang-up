@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import time
 from typing import Callable, Awaitable
+from urllib.parse import urlparse, parse_qs
 
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -26,9 +27,11 @@ from pipecat.services.llm_service import FunctionCallParams
 
 from fsm import StateMachine, AgentState
 from memory.short_term import ShortTermMemory
+from memory import long_term
 from prompts import get_system_prompt
 import tools as tool_handlers
 from tools import ToolContext, TOOL_DEFINITIONS
+from rate_limiter import get_rate_limiter
 
 
 class UserTranscriptObserver(FrameProcessor):
@@ -66,15 +69,29 @@ class AgentTranscriptObserver(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+def _parse_ws_params(client) -> dict[str, str]:
+    try:
+        path = getattr(client, "path", None) or getattr(getattr(client, "request", None), "path", "") or ""
+        qs = urlparse(path).query
+        raw = parse_qs(qs)
+        return {k: v[0] for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
 def _build_greeting(ctx) -> str:
+    lang = (ctx.target_language or "spanish").capitalize()
+    name_part = f" {ctx.user_name}" if ctx.user_name else ""
     if ctx.past_total_sessions == 0:
         return (
-            "Greet the learner warmly in English. Introduce yourself as Sofia their Spanish tutor. "
-            "Tell them you'll always explain things in English first, then give them the Spanish. "
-            "Ask which lesson they'd like to start with — greetings, numbers, or the restaurant — or if they want to jump straight into a quiz."
+            f"Greet the learner warmly in English. Introduce yourself as Sofia their {lang} tutor."
+            + (f" Use their name: {ctx.user_name}." if ctx.user_name else "")
+            + " Tell them you'll always explain things in English first, then give them the target language. "
+            + ("Ask which lesson they'd like to start with — greetings, numbers, or the restaurant — or if they want to jump straight into a quiz."
+               if ctx.target_language == "spanish"
+               else f"Ask what topic they'd like to start with, or if they want to jump straight into a simple quiz.")
         )
-    # Returning learner — Sofia knows their history
-    parts = ["Welcome back the learner in English. Tell them you remember them."]
+    parts = [f"Welcome back the learner{name_part} in English. Tell them you remember them."]
     if ctx.past_lessons_completed:
         parts.append(f"Mention they've already worked on: {', '.join(ctx.past_lessons_completed)}.")
     if ctx.past_weak_areas:
@@ -154,7 +171,6 @@ async def create_task_and_runner(
     )
     context_pair = LLMContextAggregatorPair(context)
 
-    # task is assigned below; publish_state only called at runtime so the closure is safe
     task: PipelineTask  # forward reference for the closure
 
     async def publish_state(msg: dict) -> None:
@@ -203,15 +219,65 @@ async def create_task_and_runner(
 
     llm.register_function(None, on_tool_call)
 
+    rate_limiter = get_rate_limiter()
+    client_ip: list[str] = ["unknown"]
+
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport_obj, client):
+        # Rate limit by IP
+        ip = "unknown"
+        try:
+            ip = client.remote_address[0]
+        except Exception:
+            pass
+        client_ip[0] = ip
+
+        allowed, reason = rate_limiter.check_connection(ip)
+        if not allowed:
+            print(f"[rate-limit] Rejected {ip}: {reason}")
+            try:
+                await client.close(1008, reason)
+            except Exception:
+                pass
+            return
+        rate_limiter.on_connect(ip)
+
+        # Parse user profile from WS URL query params
+        params = _parse_ws_params(client)
+        incoming_user_id = params.get("userId", user_id)
+        name = params.get("name", "")
+        language = params.get("language", "spanish")
+        goal = params.get("goal", "general")
+
+        # Persist profile and load history
+        await long_term.ensure_user(incoming_user_id, name=name, target_language=language, goal=goal)
+        past = await long_term.get_progress(incoming_user_id, language)
+
+        # Seed FSM with profile and history
+        fsm.context.user_name = name
+        fsm.context.target_language = language
+        fsm.context.user_goal = goal
+        fsm.context.past_lessons_completed = past.get("lessonsCompleted", [])
+        fsm.context.past_weak_areas = past.get("weakAreas", [])
+        fsm.context.past_total_sessions = past.get("totalSessions", 0)
+
+        # Rebuild LLM context with updated profile
         context.messages.clear()
         context.messages.append({"role": "system", "content": get_system_prompt(AgentState.IDLE, fsm.context)})
         context.messages.append({"role": "user", "content": _build_greeting(fsm.context)})
         await task.queue_frames([LLMContextFrame(context=context)])
 
+        # Notify frontend of the user profile
+        await publish_state({
+            "type": "profile",
+            "name": name,
+            "language": language,
+            "goal": goal,
+        })
+
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport_obj, client):
-        pass
+        rate_limiter.on_disconnect(client_ip[0])
+        rate_limiter.cleanup_session(session_id)
 
     return task, runner, transport

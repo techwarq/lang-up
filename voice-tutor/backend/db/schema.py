@@ -1,7 +1,10 @@
 CREATE_USERS = """
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    name TEXT DEFAULT '',
+    target_language TEXT DEFAULT 'spanish',
+    goal TEXT DEFAULT 'general'
 )"""
 
 CREATE_SESSIONS = """

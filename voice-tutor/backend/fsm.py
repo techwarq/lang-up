@@ -27,6 +27,10 @@ class FSMContext:
     current_roleplay_id: Optional[str] = None
     current_roleplay_title: Optional[str] = None
     current_roleplay_character_context: Optional[str] = None
+    # user profile (set from WS URL params on connect)
+    user_name: str = ""
+    target_language: str = "spanish"
+    user_goal: str = "general"
     # loaded from DB at session start — never mutated during session
     past_lessons_completed: list[str] = field(default_factory=list)
     past_weak_areas: list[str] = field(default_factory=list)

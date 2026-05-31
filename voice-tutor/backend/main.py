@@ -13,7 +13,6 @@ from pipeline import create_task_and_runner
 
 
 async def _health_server() -> None:
-    """Tiny HTTP server so Railway health checks pass."""
     async def health(_: web.Request) -> web.Response:
         return web.Response(text="ok")
 
@@ -22,10 +21,10 @@ async def _health_server() -> None:
     app.router.add_get("/health", health)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Railway exposes PORT for HTTP; we serve health checks there
     port = int(os.getenv("PORT", "8080"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    print(f"Health server on :{port}")
 
 
 async def run() -> None:
@@ -34,19 +33,13 @@ async def run() -> None:
     await long_term.ensure_user(user_id)
     session_id = await long_term.create_session(user_id)
 
-    # Load historical progress BEFORE building the FSM so the prompt reflects it
-    past = await long_term.get_progress(user_id)
-
     fsm = StateMachine()
-    fsm.context.past_lessons_completed = past.get("lessonsCompleted", [])
-    fsm.context.past_weak_areas = past.get("weakAreas", [])
-    fsm.context.past_total_sessions = past.get("totalSessions", 0)
-
     short_term = ShortTermMemory()
     logger = TurnLogger(session_id)
 
+    ws_port = int(os.getenv("WS_PORT", "8765"))
     print(f"Starting voice tutor — session {session_id}")
-    print(f"Listening on ws://{os.getenv('WS_HOST', '0.0.0.0')}:{os.getenv('WS_PORT', '8765')}")
+    print(f"WebSocket on :{ws_port}")
 
     task, runner, transport = await create_task_and_runner(
         fsm, short_term, user_id, session_id

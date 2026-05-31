@@ -4,13 +4,39 @@ import uuid
 from db.client import get_db
 
 
-async def ensure_user(user_id: str) -> None:
+async def ensure_user(
+    user_id: str,
+    name: str = "",
+    target_language: str = "spanish",
+    goal: str = "general",
+) -> None:
     db = await get_db()
     await db.execute(
-        "INSERT OR IGNORE INTO users (id, created_at) VALUES (?, ?)",
-        (user_id, int(time.time())),
+        "INSERT OR IGNORE INTO users (id, created_at, name, target_language, goal) VALUES (?, ?, ?, ?, ?)",
+        (user_id, int(time.time()), name, target_language, goal),
     )
+    if name or target_language != "spanish" or goal != "general":
+        await db.execute(
+            "UPDATE users SET name = ?, target_language = ?, goal = ? WHERE id = ?",
+            (name, target_language, goal, user_id),
+        )
     await db.commit()
+
+
+async def get_user_profile(user_id: str) -> dict:
+    db = await get_db()
+    async with db.execute(
+        "SELECT name, target_language, goal FROM users WHERE id = ?",
+        (user_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return {"name": "", "target_language": "spanish", "goal": "general"}
+    return {
+        "name": row["name"] or "",
+        "target_language": row["target_language"] or "spanish",
+        "goal": row["goal"] or "general",
+    }
 
 
 async def create_session(user_id: str) -> str:
@@ -55,7 +81,7 @@ async def upsert_progress(
     await db.commit()
 
 
-async def get_progress(user_id: str) -> dict:
+async def get_progress(user_id: str, language: str = "spanish") -> dict:
     db = await get_db()
     async with db.execute(
         "SELECT lesson_id, score, total, weak_areas FROM user_progress WHERE user_id = ?",
@@ -74,10 +100,12 @@ async def get_progress(user_id: str) -> dict:
     for row in rows:
         all_weak.extend(json.loads(row["weak_areas"]))
 
-    from curriculum.spanish import LESSONS
-    completed_ids = set(lessons_completed)
-    all_lesson_ids = list(LESSONS.keys())
-    recommended = next((lid for lid in all_lesson_ids if lid not in completed_ids), all_lesson_ids[0])
+    recommended = None
+    if language == "spanish":
+        from curriculum.spanish import LESSONS
+        completed_ids = set(lessons_completed)
+        all_lesson_ids = list(LESSONS.keys())
+        recommended = next((lid for lid in all_lesson_ids if lid not in completed_ids), all_lesson_ids[0])
 
     return {
         "lessonsCompleted": lessons_completed,
